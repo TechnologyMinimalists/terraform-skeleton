@@ -2,11 +2,7 @@
 
 set -u
 set -e
-# set -x
-
-# Set default bucket
-BUCKET_NAME=""
-BUCKET_REGION=""
+#set -x
 
 # Set default workdir and action variables
 WORKDIR="$( pwd )"
@@ -22,8 +18,8 @@ function show_usage() {
     echo "$0 -a ACCOUNT_NAME -e ENVIRONMENT -z ZONE [-X] [-?|-h]"
     echo ""
     echo -e "\t-a \t- Account name - one of acounts inside accounts directory, eg. main.tld"
-    echo -e "\t-e \t- Environment name, eg. prod, dev, int"
-    echo -e "\t-z \t- AWS zone, eg. eu-west-1, eu-cental-1, it might be also a custom name"
+    echo -e "\t-e \t- Workspace (environment) name, eg. production, development, staging"
+    echo -e "\t-z \t- AWS zone, eg. eu-west-1, eu-cental-1, it might be also a custom name, eg. global"
     echo -e "\t-X \t- Run 'terraform apply' after 'terraform plan' suceeds (POSSIBLY DANGEROUS)"
     echo -e "\t-h \t- Usage"
 }
@@ -36,6 +32,14 @@ account = \"$ACCOUNT\"
     echo "$tfvars" > ./terraform.tfvars
 }
 
+# Check if Terraform binary is in PATH
+if command -v terraform &> /dev/null; then
+  TERRAFORM_BIN="$(command -v terraform)"
+else
+  echo "Terraform not installed?"
+  exit 1
+fi
+
 ## Options parsing
 while getopts ":a:e:z:Xh" opt; do
     case $opt in
@@ -47,6 +51,7 @@ while getopts ":a:e:z:Xh" opt; do
             ;;
         z)
             ZONE="$OPTARG"
+            export AWS_DEFAULT_REGION="$OPTARG"
             ;;
         h)
             show_usage
@@ -75,24 +80,41 @@ if [ -z "$ACCOUNT" ] || [ -z "$ENVIRONMENT" ] || [ -z "$ZONE" ]; then
 fi
 
 # Check if environment exist
-if [ ! -d "accounts/${ACCOUNT}/${ENVIRONMENT}/${ZONE}" ]; then
-    echo "ERROR: Environment '${ACCOUNT}/${ENVIRONMENT}/${ZONE}' not found"
+if [ ! -d "accounts/${ACCOUNT}/${ZONE}" ]; then
+    echo "ERROR: Environment '${ACCOUNT}/${ZONE}' not found"
     exit 1
 fi
 
 # Go to correct environment
-cd "accounts/${ACCOUNT}/${ENVIRONMENT}/${ZONE}"
+cd "accounts/${ACCOUNT}/${ZONE}"
 
 set_terraform_vars
 
+# Init terraform backend
 $TERRAFORM_BIN init -input=false
+
+# Set workspace (new) - workspaces MUST be defined and present in git
+if ! `$TERRAFORM_BIN workspace select $ENVIRONMENT >/dev/null 2>&1`; then
+  $TERRAFORM_BIN workspace new $ENVIRONMENT 
+fi
 
 # Get Terraform modules
 $TERRAFORM_BIN get
 
+# Basic tests
+# Run TF validity
+echo " => Validating Terraform manifest..."
+$TERRAFORM_BIN validate
+echo " done."
+
+# Run syntax checks
+echo "=> Validating syntax"
+$TERRAFORM_BIN fmt -check=true
+echo "done"
+
 # Plan changes
 echo "Running plan..."
-$TERRAFORM_BIN plan
+$TERRAFORM_BIN plan -input=false -out=./terraform.tfplan
 
 if [ "$DRY_RUN" = false ]; then
     echo "Sleeping for 30 seconds before apply..."
@@ -100,7 +122,7 @@ if [ "$DRY_RUN" = false ]; then
 
     echo "Running Terraform now"
     # Run apply, we may need to run it several times in the future
-    if $TERRAFORM_BIN apply; then
+    if $TERRAFORM_BIN apply -input=false ./terraform.tfplan; then
         echo "Terraform finished successfully"
         RETCODE=0
     else
@@ -113,4 +135,3 @@ fi
 echo "All done!"
 cd $WORKDIR
 exit $RETCODE
-
